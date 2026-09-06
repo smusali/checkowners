@@ -82,8 +82,13 @@ _MOCK_PATH = patch(
 
 @pytest.fixture(autouse=True)
 def _isolate_state(tmp_path: Path) -> None:
+    import checkowners.cli as cli_mod
+
     with patch.dict("os.environ", {"CHECKOWNERS_STATE_DIR": str(tmp_path)}):
         yield
+    # The --offline global persists across invocations in the same process;
+    # reset it so it does not leak into later tests.
+    cli_mod._OFFLINE = False
 
 
 # --- analyze ---
@@ -475,7 +480,13 @@ def test_sync_noop_when_already_in_sync() -> None:
         result = runner.invoke(app, ["sync", "--json"])
     assert result.exit_code == 0
     assert json.loads(result.stdout)["committed"] is False
-    mock_run.assert_not_called()
+    # No `git add` / `git commit` is issued when already in sync. The only
+    # subprocess invocations are `git rev-parse HEAD` (for the state ref tag)
+    # during the state write.
+    add_commit = [c for c in mock_run.call_args_list if c.args and "add" in c.args[0]]
+    assert add_commit == []
+    commit_calls = [c for c in mock_run.call_args_list if c.args and "commit" in c.args[0]]
+    assert commit_calls == []
 
 
 def test_generate_refuses_handwritten_before_analyzing(tmp_path: Path) -> None:
@@ -505,3 +516,163 @@ def test_validate_errors_render_brackets_verbatim() -> None:
         result = runner.invoke(app, ["validate"])
     assert result.exit_code == 1
     assert "[companyId]" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# New tests for Issue #56 features
+# ---------------------------------------------------------------------------
+
+
+class TestCacheCommands:
+    """Verify cache subcommand group."""
+
+    def test_cache_path(self) -> None:
+        result = runner.invoke(app, ["cache", "path"])
+        assert result.exit_code == 0
+        assert len(result.stdout.strip()) > 0
+
+    def test_cache_info(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["cache", "info"])
+        assert result.exit_code == 0
+        assert "Files:" in result.stdout
+
+    def test_cache_info_json(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["cache", "info", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert "file_count" in data
+        assert "total_bytes" in data
+        assert "repos" in data
+
+    def test_cache_clear(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["cache", "clear"])
+        assert result.exit_code == 0
+
+    def test_cache_clear_json(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["cache", "clear", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert "removed" in data
+
+    def test_cache_purge(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["cache", "purge"])
+        assert result.exit_code == 0
+
+    def test_cache_purge_json(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["cache", "purge", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert "removed" in data
+
+
+class TestOfflineFlag:
+    """Verify --offline flag blocks network features."""
+
+    def test_offline_flag_sets_global(self) -> None:
+        from checkowners.cli import _OFFLINE
+
+        assert _OFFLINE is False
+
+    def test_offline_analyze_runs_cleanly(self) -> None:
+        with patch("checkowners.cli.analyze_ownership", return_value=_EMPTY_OWNERSHIP):
+            result = runner.invoke(app, ["--offline", "analyze", "--json"])
+        assert result.exit_code == 0
+
+    def test_offline_skips_handle_resolution(self) -> None:
+        with (
+            patch("checkowners.cli.analyze_ownership", return_value=_OWNERSHIP),
+            patch("checkowners.cli.resolve_handles") as mock_resolve,
+            _MOCK_TOKEN,
+        ):
+            result = runner.invoke(app, ["--offline", "analyze"])
+        assert result.exit_code == 0
+        mock_resolve.assert_not_called()
+
+    def test_offline_blocks_github_token(self) -> None:
+        with (
+            patch("checkowners.cli.analyze_ownership", return_value=_OWNERSHIP),
+            patch("checkowners.cli.generate_codeowners", return_value="content"),
+            _MOCK_PATH,
+            _MOCK_TOKEN,
+        ):
+            result = runner.invoke(app, ["--offline", "generate"])
+        assert result.exit_code == 0
+
+    def test_offline_json_output(self) -> None:
+        with patch("checkowners.cli.analyze_ownership", return_value=_EMPTY_OWNERSHIP):
+            result = runner.invoke(app, ["--offline", "analyze", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert "inferred" in data
+
+    def test_offline_emits_status_strings(self) -> None:
+        with patch("checkowners.cli.analyze_ownership", return_value=_EMPTY_OWNERSHIP):
+            result = runner.invoke(app, ["--offline", "analyze", "--json"])
+        assert result.exit_code == 0
+        assert "Network access: disabled" in result.stderr
+        assert "Review evidence: unavailable" in result.stderr
+        assert "Team verification: unavailable" in result.stderr
+
+    def test_offline_strings_kept_out_of_json(self) -> None:
+        with patch("checkowners.cli.analyze_ownership", return_value=_EMPTY_OWNERSHIP):
+            result = runner.invoke(app, ["--offline", "analyze", "--json"])
+        assert result.exit_code == 0
+        stdout = json.loads(result.stdout)
+        assert "Network access: disabled" not in json.dumps(stdout)
+
+    def test_offline_never_opens_sockets(self) -> None:
+        def _forbid(*args: object, **kwargs: object) -> None:
+            raise AssertionError("network socket opened while offline")
+
+        with (
+            patch("checkowners.cli.analyze_ownership", return_value=_EMPTY_OWNERSHIP),
+            patch("socket.socket.connect", side_effect=_forbid),
+            patch("socket.socket.send", side_effect=_forbid),
+            patch("socket.create_connection", side_effect=_forbid),
+        ):
+            result = runner.invoke(app, ["--offline", "analyze", "--json"])
+        assert result.exit_code == 0
+
+    def test_online_does_not_emit_offline_status(self) -> None:
+        with (
+            patch("checkowners.cli.analyze_ownership", return_value=_EMPTY_OWNERSHIP),
+            _MOCK_TOKEN,
+        ):
+            result = runner.invoke(app, ["analyze", "--json"])
+        assert result.exit_code == 0
+        assert "Network access: disabled" not in result.stderr
+
+
+class TestStalenessInCLI:
+    """Verify --allow-stale and --max-age work through CLI commands."""
+
+    def test_load_or_analyze_with_stale_state_refreshes(self, tmp_path: Path) -> None:
+        from checkowners.cli import _load_or_analyze
+        from checkowners.models import Config
+        from checkowners.state import StalenessError
+
+        config = Config()
+        with (
+            patch(
+                "checkowners.cli.load_ownership",
+                side_effect=StalenessError("stale"),
+            ),
+            patch("checkowners.cli._run_analyze", return_value=_OWNERSHIP) as mock_analyze,
+        ):
+            result = _load_or_analyze(config, tmp_path)
+        assert result == _OWNERSHIP
+        mock_analyze.assert_called_once()
+
+    def test_load_or_analyze_with_no_cache(self, tmp_path: Path) -> None:
+        from checkowners.cli import _load_or_analyze
+        from checkowners.models import Config
+
+        config = Config()
+        with (
+            patch("checkowners.cli._run_analyze", return_value=_OWNERSHIP) as mock_analyze,
+            patch("checkowners.cli.load_ownership") as mock_load,
+        ):
+            result = _load_or_analyze(config, tmp_path, no_cache=True)
+        assert result == _OWNERSHIP
+        mock_load.assert_not_called()
+        mock_analyze.assert_called_once()

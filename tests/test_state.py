@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+import threading
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,11 +21,18 @@ from checkowners.models import (
 )
 from checkowners.state import (
     SCHEMA_VERSION,
+    StalenessError,
     _state_path,
+    cache_dir,
+    cache_info,
+    clear_repo_cache,
+    evict_if_oversize,
     load_ownership,
+    purge_cache,
     read_graph_cache,
     read_handle_cache,
     read_state,
+    validate_staleness,
     write_graph_cache,
     write_handle_cache,
     write_state,
@@ -122,13 +130,14 @@ def test_write_and_read_roundtrip(repo: Path) -> None:
             recommended_backups=("@bob",),
         ),
     )
-    target = write_state(
-        repo,
-        ownership,
-        topology=topology,
-        bus_factor_summary=bus_factor,
-        drift_detected=True,
-    )
+    with patch("checkowners.state._git_head_ref", return_value="abc123"):
+        target = write_state(
+            repo,
+            ownership,
+            topology=topology,
+            bus_factor_summary=bus_factor,
+            drift_detected=True,
+        )
     assert target.exists()
     data = read_state(repo)
     assert data is not None
@@ -139,20 +148,25 @@ def test_write_and_read_roundtrip(repo: Path) -> None:
     assert data["bus_factor_summary"]["critical_paths"] == ["src/auth.py"]
     assert data["bus_factor_summary"]["repo_average"] == 1.0
     assert "src/auth.py" in data["inferred"]
+    assert data["analyzed_ref"] == "abc123"
+    assert "analyzed_at" in data
+    assert data["model_version"] == "0.6.0"
 
 
 def test_state_isolated_between_repos(tmp_path: Path, repo: Path) -> None:
     """Analyzing repo A must never leak ownership into repo B."""
     other = tmp_path / "other-repo"
     other.mkdir()
-    write_state(repo, _make_ownership())
+    with patch("checkowners.state._git_head_ref", return_value="abc123"):
+        write_state(repo, _make_ownership())
     assert load_ownership(other) is None
     assert load_ownership(repo) is not None
 
 
 def test_load_ownership_roundtrip(repo: Path) -> None:
     original = _make_ownership()
-    write_state(repo, original)
+    with patch("checkowners.state._git_head_ref", return_value="abc123"):
+        write_state(repo, original)
     loaded = load_ownership(repo)
     assert loaded is not None
     assert set(loaded.paths) == set(original.paths)
@@ -214,7 +228,10 @@ def test_load_ownership_skips_malformed_path(repo: Path) -> None:
 
 def test_write_state_creates_parent_dirs(tmp_path: Path, repo: Path) -> None:
     nested = tmp_path / "nested" / "dir"
-    with patch.dict("os.environ", {"CHECKOWNERS_STATE_DIR": str(nested)}):
+    with (
+        patch.dict("os.environ", {"CHECKOWNERS_STATE_DIR": str(nested)}),
+        patch("checkowners.state._git_head_ref", return_value="abc123"),
+    ):
         target = write_state(repo, _make_ownership())
     assert target.exists()
     assert target.is_relative_to(nested)
@@ -222,7 +239,8 @@ def test_write_state_creates_parent_dirs(tmp_path: Path, repo: Path) -> None:
 
 def test_bus_factor_summary_empty(repo: Path) -> None:
     ownership = _make_ownership()
-    target = write_state(repo, ownership)
+    with patch("checkowners.state._git_head_ref", return_value="abc123"):
+        target = write_state(repo, ownership)
     data = json.loads(target.read_text(encoding="utf-8"))
     assert data["bus_factor_summary"]["critical_paths"] == []
     assert data["bus_factor_summary"]["repo_average"] == 0.0
@@ -248,13 +266,15 @@ def test_handle_cache_missing_returns_empty() -> None:
 
 def test_graph_cache_roundtrip(tmp_path: Path) -> None:
     graph_data = {"nodes": [{"id": "contrib::a"}], "edges": []}
-    target = write_graph_cache(tmp_path, _NOW, graph_data)
+    with patch("checkowners.state._git_head_ref", return_value="abc123"):
+        target = write_graph_cache(tmp_path, _NOW, graph_data)
     assert target.exists()
     assert read_graph_cache(tmp_path, _NOW) == graph_data
 
 
 def test_graph_cache_stale_timestamp_ignored(tmp_path: Path) -> None:
-    write_graph_cache(tmp_path, _NOW, {"nodes": [], "edges": []})
+    with patch("checkowners.state._git_head_ref", return_value="abc123"):
+        write_graph_cache(tmp_path, _NOW, {"nodes": [], "edges": []})
     newer = datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC)
     assert read_graph_cache(tmp_path, newer) is None
 
@@ -268,6 +288,324 @@ def test_graph_cache_keyed_by_repo(tmp_path: Path) -> None:
     repo_b = tmp_path / "b"
     repo_a.mkdir()
     repo_b.mkdir()
-    write_graph_cache(repo_a, _NOW, {"nodes": [{"id": "a"}], "edges": []})
+    with patch("checkowners.state._git_head_ref", return_value="abc123"):
+        write_graph_cache(repo_a, _NOW, {"nodes": [{"id": "a"}], "edges": []})
     assert read_graph_cache(repo_b, _NOW) is None
     assert read_graph_cache(repo_a, _NOW) == {"nodes": [{"id": "a"}], "edges": []}
+
+
+# ---------------------------------------------------------------------------
+# New tests for Issue #56 features
+# ---------------------------------------------------------------------------
+
+
+class TestAtomicWrites:
+    """Verify atomic write helpers produce valid JSON files."""
+
+    def test_atomic_write_roundtrip(self, tmp_path: Path) -> None:
+        from checkowners.state import _atomic_write
+
+        target = tmp_path / "test.json"
+        data = json.dumps({"hello": "world"})
+        result = _atomic_write(target, data)
+        assert result == target
+        assert target.read_text(encoding="utf-8") == data
+
+    def test_atomic_write_overwrites_existing(self, tmp_path: Path) -> None:
+        from checkowners.state import _atomic_write
+
+        target = tmp_path / "test.json"
+        _atomic_write(target, json.dumps({"v": 1}))
+        _atomic_write(target, json.dumps({"v": 2}))
+        assert json.loads(target.read_text(encoding="utf-8")) == {"v": 2}
+
+    def test_atomic_write_no_temp_files_left(self, tmp_path: Path) -> None:
+        from checkowners.state import _atomic_write
+
+        target = tmp_path / "test.json"
+        _atomic_write(target, json.dumps({"x": 1}))
+        remaining = list(tmp_path.iterdir())
+        assert len(remaining) == 1
+        assert remaining[0].name == "test.json"
+
+    def test_write_state_uses_analyzed_ref(self, repo: Path) -> None:
+        with patch("checkowners.state._git_head_ref", return_value="deadbeef"):
+            write_state(repo, _make_ownership())
+        data = read_state(repo)
+        assert data is not None
+        assert data["analyzed_ref"] == "deadbeef"
+        assert isinstance(data["analyzed_at"], str)
+        assert data["model_version"] == "0.6.0"
+
+    def test_write_state_analyzed_ref_none_when_git_fails(self, repo: Path) -> None:
+        with patch("checkowners.state._git_head_ref", return_value=None):
+            write_state(repo, _make_ownership())
+        data = read_state(repo)
+        assert data is not None
+        assert data["analyzed_ref"] is None
+
+
+class TestConcurrency:
+    """Parallel atomic writes must not corrupt state."""
+
+    def test_parallel_writes_no_corruption(self, tmp_path: Path) -> None:
+        from checkowners.state import _atomic_write
+
+        target = tmp_path / "shared.json"
+        errors: list[Exception] = []
+
+        def writer(value: int) -> None:
+            try:
+                for _ in range(20):
+                    _atomic_write(target, json.dumps({"value": value}))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=writer, args=(i,)) for i in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        raw = target.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        assert "value" in data
+        assert isinstance(data["value"], int)
+
+    def test_no_orphaned_lock_files(self, tmp_path: Path) -> None:
+        from checkowners.state import _atomic_write
+
+        target = tmp_path / "test.json"
+        for i in range(10):
+            _atomic_write(target, json.dumps({"i": i}))
+        lock_files = list(tmp_path.glob("*.lock"))
+        assert lock_files == []
+
+
+class TestStaleness:
+    """Validate staleness detection and --allow-stale bypass."""
+
+    def test_staleness_error_raised_when_ref_not_ancestor(self, repo: Path) -> None:
+        """State analyzed at commit A, current HEAD is commit B (not a descendant)."""
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "repo": str(repo.resolve()),
+            "analyzed_ref": "aaa111",
+            "analyzed_at": _NOW.isoformat(),
+            "last_analyzed": _NOW.isoformat(),
+            "inferred": {},
+            "drift_detected": False,
+        }
+        _write_raw_state(repo, payload)
+
+        with (
+            patch("checkowners.state._git_head_ref", return_value="bbb222"),
+            patch("checkowners.state._is_ancestor", return_value=False),
+            pytest.raises(StalenessError, match="not an ancestor"),
+        ):
+            load_ownership(repo)
+
+    def test_staleness_bypassed_with_allow_stale(self, repo: Path) -> None:
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "repo": str(repo.resolve()),
+            "analyzed_ref": "aaa111",
+            "analyzed_at": _NOW.isoformat(),
+            "last_analyzed": _NOW.isoformat(),
+            "inferred": {
+                "src/main.py": {
+                    "owners": [
+                        {
+                            "handle": "@alice",
+                            "confidence": 0.5,
+                            "last_commit": _NOW.isoformat(),
+                            "commits": 5,
+                        }
+                    ],
+                    "bus_factor": 1,
+                    "decay_warnings": [],
+                },
+            },
+            "drift_detected": False,
+        }
+        _write_raw_state(repo, payload)
+
+        with (
+            patch("checkowners.state._git_head_ref", return_value="bbb222"),
+            patch("checkowners.state._is_ancestor", return_value=False),
+        ):
+            loaded = load_ownership(repo, allow_stale=True)
+            assert loaded is not None
+
+    def test_staleness_error_on_max_age(self, repo: Path) -> None:
+        old_time = (_NOW - timedelta(days=300)).isoformat()
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "repo": str(repo.resolve()),
+            "analyzed_ref": "aaa111",
+            "analyzed_at": old_time,
+            "last_analyzed": _NOW.isoformat(),
+            "inferred": {},
+            "drift_detected": False,
+        }
+        _write_raw_state(repo, payload)
+
+        with (
+            patch("checkowners.state._git_head_ref", return_value="aaa111"),
+            patch("checkowners.state._is_ancestor", return_value=True),
+            pytest.raises(StalenessError, match="days old"),
+        ):
+            load_ownership(repo, max_age_days=30)
+
+    def test_max_age_bypassed_with_allow_stale(self, repo: Path) -> None:
+        old_time = (_NOW - timedelta(days=300)).isoformat()
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "repo": str(repo.resolve()),
+            "analyzed_ref": "aaa111",
+            "analyzed_at": old_time,
+            "last_analyzed": _NOW.isoformat(),
+            "inferred": {},
+            "drift_detected": False,
+        }
+        _write_raw_state(repo, payload)
+
+        with (
+            patch("checkowners.state._git_head_ref", return_value="aaa111"),
+            patch("checkowners.state._is_ancestor", return_value=True),
+        ):
+            loaded = load_ownership(repo, allow_stale=True, max_age_days=30)
+            assert loaded is not None
+
+    def test_fresh_state_not_rejected(self, repo: Path) -> None:
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "repo": str(repo.resolve()),
+            "analyzed_ref": "aaa111",
+            "analyzed_at": _NOW.isoformat(),
+            "last_analyzed": _NOW.isoformat(),
+            "inferred": {},
+            "drift_detected": False,
+        }
+        _write_raw_state(repo, payload)
+
+        with (
+            patch("checkowners.state._git_head_ref", return_value="bbb222"),
+            patch("checkowners.state._is_ancestor", return_value=True),
+        ):
+            loaded = load_ownership(repo)
+            assert loaded is not None
+
+    def test_validate_staleness_fresh_ref(self) -> None:
+        data = {"analyzed_ref": "aaa"}
+        with (
+            patch("checkowners.state._git_head_ref", return_value="bbb"),
+            patch("checkowners.state._is_ancestor", return_value=True),
+        ):
+            validate_staleness(data, Path("."), allow_stale=False)
+
+    def test_validate_staleness_stale_ref_raises(self) -> None:
+        data = {"analyzed_ref": "aaa"}
+        with (
+            patch("checkowners.state._git_head_ref", return_value="bbb"),
+            patch("checkowners.state._is_ancestor", return_value=False),
+            pytest.raises(StalenessError),
+        ):
+            validate_staleness(data, Path("."), allow_stale=False)
+
+    def test_validate_staleness_missing_ref_skips_check(self) -> None:
+        data = {}
+        with patch("checkowners.state._git_head_ref", return_value="bbb"):
+            validate_staleness(data, Path("."), allow_stale=False)
+
+    def test_validate_staleness_missing_head_skips_check(self) -> None:
+        data = {"analyzed_ref": "aaa"}
+        with patch("checkowners.state._git_head_ref", return_value=None):
+            validate_staleness(data, Path("."), allow_stale=False)
+
+
+class TestCacheCommands:
+    """Verify cache utility functions."""
+
+    def test_cache_dir_returns_path(self) -> None:
+        result = cache_dir()
+        assert isinstance(result, Path)
+
+    def test_cache_info_empty(self, tmp_path: Path) -> None:
+        with patch("checkowners.state._base_dir", return_value=tmp_path):
+            info = cache_info()
+            assert info["file_count"] == 0
+            assert info["total_bytes"] == 0
+            assert info["repos"] == {}
+
+    def test_cache_info_with_files(self, tmp_path: Path) -> None:
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        (state_dir / "abc.json").write_text('{"x": 1}', encoding="utf-8")
+        with patch("checkowners.state._base_dir", return_value=tmp_path):
+            info = cache_info()
+            assert info["file_count"] == 1
+            assert info["total_bytes"] > 0
+            assert "abc" in info["repos"]
+
+    def test_clear_repo_cache(self, tmp_path: Path) -> None:
+        state_dir = tmp_path / "state"
+        graph_dir = tmp_path / "graph"
+        state_dir.mkdir()
+        graph_dir.mkdir()
+        (state_dir / "abc.json").write_text('{"x": 1}', encoding="utf-8")
+        (graph_dir / "abc.json").write_text('{"g": 1}', encoding="utf-8")
+
+        with patch("checkowners.state._base_dir", return_value=tmp_path):
+            removed = clear_repo_cache(Path("/nonexistent"))
+            assert removed == 0
+
+    def test_purge_cache(self, tmp_path: Path) -> None:
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        (state_dir / "test.json").write_text("data", encoding="utf-8")
+
+        with patch("checkowners.state._base_dir", return_value=tmp_path):
+            removed = purge_cache()
+            assert removed >= 1
+            assert not (state_dir / "test.json").exists()
+
+    def test_evict_if_oversize_under_limit(self, tmp_path: Path) -> None:
+        small = tmp_path / "small.json"
+        small.write_text("{}", encoding="utf-8")
+        with patch("checkowners.state._base_dir", return_value=tmp_path):
+            evicted = evict_if_oversize()
+            assert evicted == 0
+
+    def test_evict_if_oversize_over_limit(self, tmp_path: Path) -> None:
+        with patch("checkowners.state.MAX_CACHE_SIZE_BYTES", 100):
+            for i in range(10):
+                f = tmp_path / f"file_{i}.json"
+                f.write_text(json.dumps({"i": i, "data": "x" * 20}), encoding="utf-8")
+            with patch("checkowners.state._base_dir", return_value=tmp_path):
+                evicted = evict_if_oversize()
+                assert evicted > 0
+
+
+class TestSchemaVersion:
+    """Schema v4 contract checks."""
+
+    def test_schema_version_is_4(self) -> None:
+        assert SCHEMA_VERSION == 4
+
+    def test_write_state_includes_model_version(self, repo: Path) -> None:
+        with patch("checkowners.state._git_head_ref", return_value="abc123"):
+            write_state(repo, _make_ownership())
+        data = read_state(repo)
+        assert data is not None
+        assert data["model_version"] == "0.6.0"
+
+    def test_write_graph_cache_includes_model_version(self, tmp_path: Path) -> None:
+        from checkowners.state import _graph_cache_path
+
+        with patch("checkowners.state._git_head_ref", return_value="abc123"):
+            write_graph_cache(tmp_path, _NOW, {"nodes": [], "edges": []})
+        raw = json.loads(_graph_cache_path(tmp_path).read_text(encoding="utf-8"))
+        assert raw["model_version"] == "0.6.0"
+        assert raw["analyzed_ref"] == "abc123"

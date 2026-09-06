@@ -57,7 +57,13 @@ from checkowners.models import (
 from checkowners.notify import compute_severity, send_notification
 from checkowners.onboard import OnboardingPath, generate_onboarding_path
 from checkowners.state import (
+    StalenessError,
+    cache_dir,
+    cache_info,
+    clear_repo_cache,
+    evict_if_oversize,
     load_ownership,
+    purge_cache,
     read_graph_cache,
     write_graph_cache,
     write_state,
@@ -80,10 +86,37 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
+cache_app = typer.Typer(help="Manage the local checkowners cache.", no_args_is_help=True)
+app.add_typer(cache_app, name="cache")
+
 console = Console()
 err_console = Console(stderr=True)
 
 JsonOption = Annotated[bool, typer.Option("--json", help="Output as JSON.")]
+
+
+# ---------------------------------------------------------------------------
+# Global --offline state
+# ---------------------------------------------------------------------------
+
+_OFFLINE: bool = False
+
+
+def is_offline() -> bool:
+    """Return True when the global --offline flag is active."""
+    return _OFFLINE
+
+
+def _emit_offline_status() -> None:
+    """Print offline-mode diagnostics to stderr (never stdout, to keep --json clean)."""
+    if not _OFFLINE:
+        return
+    for line in (
+        "Network access: disabled",
+        "Review evidence: unavailable",
+        "Team verification: unavailable",
+    ):
+        err_console.print(f"[dim]{line}[/dim]")
 
 
 def _version_callback(value: bool) -> None:
@@ -103,8 +136,18 @@ def _app_callback(
             help="Show the version and exit.",
         ),
     ] = False,
+    offline: Annotated[
+        bool,
+        typer.Option(
+            "--offline",
+            help="Disable all outbound network requests.",
+        ),
+    ] = False,
 ) -> None:
     """Infer and maintain CODEOWNERS from git history."""
+    global _OFFLINE  # noqa: PLW0603
+    _OFFLINE = offline
+    _emit_offline_status()
 
 
 def _resolve_github_owners(ownership: OwnershipMap, config: Config) -> OwnershipMap:
@@ -117,7 +160,7 @@ def _resolve_github_owners(ownership: OwnershipMap, config: Config) -> Ownership
     so one owner with two emails can no longer masquerade as a bus factor
     of two.
     """
-    if not config.github.resolve_handles:
+    if _OFFLINE or not config.github.resolve_handles:
         return ownership
     emails = {o.handle for po in ownership.paths.values() for o in po.owners}
     for po in ownership.paths.values():
@@ -255,7 +298,7 @@ def _review_provider(config: Config) -> ReviewProvider | None:
     slug (set in GitHub Actions). Returns None otherwise, leaving the review
     factor at 0.0.
     """
-    if not config.github.api_enabled:
+    if _OFFLINE or not config.github.api_enabled:
         return None
     repo_full_name = os.environ.get("GITHUB_REPOSITORY", "")
     if not repo_full_name:
@@ -299,12 +342,30 @@ def _run_analyze(config: Config, repo_root: Path) -> OwnershipMap:
         raise typer.Exit(code=1) from None
     ownership = _resolve_github_owners(ownership, config)
     write_state(repo_root, ownership)
+    evict_if_oversize()
     return ownership
 
 
-def _load_or_analyze(config: Config, repo_root: Path) -> OwnershipMap:
+def _load_or_analyze(
+    config: Config,
+    repo_root: Path,
+    *,
+    allow_stale: bool = False,
+    max_age_days: float | None = None,
+    no_cache: bool = False,
+) -> OwnershipMap:
     """Use this repo's cached state when available; otherwise re-analyze."""
-    cached = load_ownership(repo_root)
+    if no_cache:
+        return _run_analyze(config, repo_root)
+    try:
+        cached = load_ownership(
+            repo_root,
+            allow_stale=allow_stale,
+            max_age_days=max_age_days,
+        )
+    except StalenessError as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        return _run_analyze(config, repo_root)
     if cached is not None:
         cached_at = cached.last_analyzed.isoformat(timespec="seconds")
         err_console.print(
@@ -324,8 +385,45 @@ def _expertise_rank_payload(rank: ExpertiseRank) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Common option types for staleness
+# ---------------------------------------------------------------------------
+
+AllowStaleOption = Annotated[
+    bool,
+    typer.Option(
+        "--allow-stale",
+        help="Accept cached state even when the analyzed ref is stale.",
+    ),
+]
+
+MaxAgeOption = Annotated[
+    float | None,
+    typer.Option(
+        "--max-age",
+        help="Maximum age of cached state in days before re-analysis.",
+    ),
+]
+
+NoCacheOption = Annotated[
+    bool,
+    typer.Option(
+        "--no-cache",
+        help="Bypass cached state and force a fresh analysis.",
+    ),
+]
+
+
+# --- analyze ---
+
+
 @app.command()
-def analyze(json_output: JsonOption = False) -> None:
+def analyze(
+    json_output: JsonOption = False,
+    allow_stale: AllowStaleOption = False,
+    max_age: MaxAgeOption = None,
+    no_cache: NoCacheOption = False,
+) -> None:
     """Analyze git history to infer confidence-scored ownership."""
     config = load_config()
     ownership = _run_analyze(config, Path.cwd())
@@ -358,14 +456,20 @@ def _check_overwrite_or_exit(codeowners_path: Path, config: Config, force: bool)
 
 
 @app.command()
-def generate(json_output: JsonOption = False, force: ForceOption = False) -> None:
+def generate(
+    json_output: JsonOption = False,
+    force: ForceOption = False,
+    allow_stale: AllowStaleOption = False,
+    max_age: MaxAgeOption = None,
+    no_cache: NoCacheOption = False,
+) -> None:
     """Generate a CODEOWNERS file from inferred ownership."""
     config = load_config()
     repo_root = Path.cwd()
     codeowners_path = find_codeowners_path(repo_root)
     _check_overwrite_or_exit(codeowners_path, config, force)
     ownership = _run_analyze(config, repo_root)
-    token = get_github_token()
+    token = get_github_token() if not _OFFLINE else ""
     try:
         content = generate_codeowners(
             repo_root,
@@ -459,7 +563,12 @@ def _render_drift_table(result: DriftResult) -> None:
 
 
 @app.command()
-def drift(json_output: JsonOption = False) -> None:
+def drift(
+    json_output: JsonOption = False,
+    allow_stale: AllowStaleOption = False,
+    max_age: MaxAgeOption = None,
+    no_cache: NoCacheOption = False,
+) -> None:
     """Detect drift between inferred and current CODEOWNERS."""
     config = load_config()
     repo_root = Path.cwd()
@@ -525,14 +634,17 @@ def notify(json_output: JsonOption = False) -> None:
 
 
 @app.command()
-def sync(json_output: JsonOption = False, force: ForceOption = False) -> None:
+def sync(
+    json_output: JsonOption = False,
+    force: ForceOption = False,
+) -> None:
     """Sync CODEOWNERS with inferred ownership (generate + commit)."""
     config = load_config()
     repo_root = Path.cwd()
     codeowners_path = find_codeowners_path(repo_root)
     _check_overwrite_or_exit(codeowners_path, config, force)
     ownership = _run_analyze(config, repo_root)
-    token = get_github_token()
+    token = get_github_token() if not _OFFLINE else ""
     try:
         content = generate_codeowners(
             repo_root,
@@ -909,7 +1021,7 @@ def topology(json_output: JsonOption = False) -> None:
     """Infer team topology from commit co-occurrence patterns."""
     config = load_config()
     ownership = _load_or_analyze(config, Path.cwd())
-    declared = declared_teams_from_github(config)
+    declared = declared_teams_from_github(config) if not _OFFLINE else None
     report = infer_topology(ownership, config, declared_teams=declared)
     if json_output:
         typer.echo(json.dumps(_topology_payload(report), indent=2))
@@ -1087,6 +1199,61 @@ def trends(
             f"{point.avg_bus_factor:.2f}",
         )
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# cache subcommand group
+# ---------------------------------------------------------------------------
+
+
+@cache_app.command(name="path")
+def cache_path_cmd() -> None:
+    """Print the cache directory path."""
+    typer.echo(str(cache_dir()))
+
+
+@cache_app.command(name="info")
+def cache_info_cmd(json_output: JsonOption = False) -> None:
+    """Print cache file count, total size, and repository breakdown."""
+    info = cache_info()
+    if json_output:
+        typer.echo(json.dumps(info, indent=2))
+        return
+    total_kb = info["total_bytes"] / 1024.0
+    console.print(f"Files: {info['file_count']}")
+    console.print(f"Total size: {total_kb:.1f} KB ({info['total_bytes']} bytes)")
+    if info["repos"]:
+        console.print("[bold]Repository breakdown:[/bold]")
+        for repo_hash, detail in info["repos"].items():
+            kb = detail["bytes"] / 1024.0
+            console.print(f"  {repo_hash}: {detail['files']} file(s), {kb:.1f} KB")
+
+
+@cache_app.command(name="clear")
+def cache_clear_cmd(json_output: JsonOption = False) -> None:
+    """Remove cached state and graph for the current repository."""
+    repo_root = Path.cwd()
+    removed = clear_repo_cache(repo_root)
+    if json_output:
+        typer.echo(json.dumps({"removed": removed}, indent=2))
+        return
+    if removed:
+        console.print(f"[green]Removed {removed} file(s) for this repository.[/green]")
+    else:
+        console.print("[yellow]No cached files found for this repository.[/yellow]")
+
+
+@cache_app.command(name="purge")
+def cache_purge_cmd(json_output: JsonOption = False) -> None:
+    """Purge the entire cache directory."""
+    removed = purge_cache()
+    if json_output:
+        typer.echo(json.dumps({"removed": removed}, indent=2))
+        return
+    if removed:
+        console.print(f"[green]Purged {removed} file(s) from the cache.[/green]")
+    else:
+        console.print("[yellow]Cache directory is already empty.[/yellow]")
 
 
 def main() -> None:
