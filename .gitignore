@@ -21,6 +21,8 @@ sdist/
 var/
 wheels/
 share/python-wheels/
+*.whl
+!/checkowners-*-py3-none-any.whl
 *.egg-info/
 .installed.cfg
 *.egg

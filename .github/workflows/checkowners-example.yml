@@ -25,9 +25,9 @@ jobs:
           # Keep the action non-failing so the label + fail steps below still
           # run; this workflow gates the merge with its own final step.
           fail_on_drift: "false"
-          # Dogfood the checked-out source rather than the PyPI release so
+          # Dogfood the checked-out source rather than the pinned wheel so
           # this repo's PRs test the code they contain. Downstream users
-          # should OMIT install_spec (the action then installs from PyPI).
+          # should OMIT install_spec (the action then installs the pinned wheel).
           install_spec: ".[graph,github]"
 
       - name: Assert owner comparison ran

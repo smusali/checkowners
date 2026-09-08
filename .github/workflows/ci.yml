@@ -36,6 +36,9 @@ jobs:
       - name: Fail if README or project URLs are not PyPI-safe
         run: python tools/check_pypi_readme.py
 
+      - name: Fail if the Action package pin is inconsistent
+        run: python tools/check_changelog.py --check-pins
+
   test:
     runs-on: ubuntu-latest
     strategy:

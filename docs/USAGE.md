@@ -185,6 +185,17 @@ The composite action also accepts `fail_on_drift: "false"` if you want to commen
 
 The action fails fast with a clear error when it detects a shallow clone: `git log` and `git blame` need history, so the `actions/checkout` step must set `fetch-depth: 0`.
 
+With no extra inputs, Action `vX.Y.Z` installs `checkowners==X.Y.Z` from the wheel committed next to `action.yml`, and installs third-party dependencies from `requirements.lock` with `pip install --require-hashes --only-binary :all:`. An empty `checkowners_version` uses that pin; it never installs "whatever PyPI serves today." After install, the action asserts `checkowners --version` matches the pin.
+
+Advanced install inputs:
+
+| Input | Default | Purpose |
+|-------|---------|---------|
+| `checkowners_version` | this Action's tag version | Override to install a different published version from the index. That path still uses the hashed lockfile for third-party deps, but skips hash verification for the `checkowners` package itself. |
+| `index_url` | (PyPI) | pip `--index-url` for an internal mirror. |
+| `offline` | `"false"` | Install the committed wheel with `--no-index --find-links`. The override must match the pin. A fully air-gapped runner also needs the lockfile wheels on disk (`pip download --require-hashes -r requirements.lock -d <dir>`) or a reachable `index_url`. |
+| `install_spec` | `""` | **Security-sensitive.** Allowed only as a local extras spec for dogfooding this repository: `.`, `.[graph]`, `.[github]`, `.[graph,github]`, `.[github,graph]`, or `.[all]`. Interpolating untrusted workflow data into this input is remote code execution. Downstream callers must omit it. |
+
 ## How checkowners compares
 
 | Tool | Inference | Confidence | Drift | Bus factor | Decay | Topology | Onboarding |
