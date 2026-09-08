@@ -248,6 +248,15 @@ def _render_ownership_table(ownership: OwnershipMap) -> None:
     console.print(table)
 
 
+def _warn_missing_api_token(config: Config) -> None:
+    if config.github.api_enabled and not get_github_token():
+        err_console.print(
+            "[yellow]github.api_enabled is true but GITHUB_TOKEN is not set. "
+            "Review coverage, topology reconciliation, and review-load "
+            "balance are disabled.[/yellow]"
+        )
+
+
 def _review_provider(config: Config) -> ReviewProvider | None:
     """Build a GitHub-backed review provider when the API is enabled.
 
@@ -271,6 +280,7 @@ def _review_provider(config: Config) -> ReviewProvider | None:
 
 
 def _run_analyze(config: Config, repo_root: Path) -> OwnershipMap:
+    _warn_missing_api_token(config)
     progress = Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -306,6 +316,7 @@ def _load_or_analyze(config: Config, repo_root: Path) -> OwnershipMap:
     """Use this repo's cached state when available; otherwise re-analyze."""
     cached = load_ownership(repo_root)
     if cached is not None:
+        _warn_missing_api_token(config)
         cached_at = cached.last_analyzed.isoformat(timespec="seconds")
         err_console.print(
             f"[dim]Using cached analysis from {cached_at}; "

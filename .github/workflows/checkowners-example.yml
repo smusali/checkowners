@@ -30,6 +30,18 @@ jobs:
           # should OMIT install_spec (the action then installs from PyPI).
           install_spec: ".[graph,github]"
 
+      - name: Assert owner comparison ran
+        run: |
+          python -c "
+          import json, sys
+          data = json.load(open('drift.json'))
+          notes = data.get('notes') or []
+          bad = [n for n in notes if 'commit emails' in n]
+          if bad:
+              print('identity note present; owner comparison was skipped:', bad)
+              sys.exit(1)
+          "
+
       # Example of consuming the action's outputs for custom logic.
       - name: Add ownership-critical label
         if: fromJson(steps.checkowners.outputs.bus_factor_summary).critical_paths[0]

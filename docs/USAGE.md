@@ -179,6 +179,8 @@ jobs:
 
 `checkowners drift --json` writes `checkowners_drift` to `GITHUB_OUTPUT` with `drift_detected`, `max_confidence_delta`, `severity`, `notes`, and per-entry `bus_factor` / `decay` flags so workflows can label PRs, comment, or fail required checks.
 
+The composite action exports `GITHUB_TOKEN` on every CLI step from the `github_token` input, which defaults to `${{ github.token }}`. Most callers can omit the input. Override it with a PAT or App token when the default job token cannot list org teams. Minimum permissions for each capability are listed in [docs/FAQ.md](FAQ.md#what-token-scopes-are-needed).
+
 The composite action also accepts `fail_on_drift: "false"` if you want to comment without blocking, `include_bus_factor` / `include_decay` toggles for the secondary outputs, and `comment_on_pr` (default `"true"`) which maintains a single drift + bus-factor summary comment on the pull request, updated in place on every push and marked resolved when drift clears (the job must grant `pull-requests: write`).
 
 The action fails fast with a clear error when it detects a shallow clone: `git log` and `git blame` need history, so the `actions/checkout` step must set `fetch-depth: 0`.
