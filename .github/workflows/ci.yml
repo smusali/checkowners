@@ -87,6 +87,50 @@ jobs:
           python -c "import json; d=json.load(open('drift.json')); assert 'drift_detected' in d and 'severity' in d, d"
           python -c "import json; d=json.load(open('bus.json')); assert 'entries' in d, d"
 
+  token-missing-warning:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install hatch and the local package
+        run: |
+          pip install hatch
+          hatch build
+          wheel=$(ls dist/checkowners-*-py3-none-any.whl)
+          pip install "${wheel}[graph,github]"
+
+      - name: Warn when api_enabled and GITHUB_TOKEN is unset
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          src = Path(".github/checkowners.yml").read_text()
+          Path("/tmp/checkowners-api.yml").write_text(
+              src.replace("api_enabled: false", "api_enabled: true")
+          )
+          PY
+          set +e
+          GITHUB_TOKEN= CHECKOWNERS_CONFIG=/tmp/checkowners-api.yml \
+            checkowners analyze --json > /tmp/analyze.json 2> /tmp/analyze.err
+          code=$?
+          set -e
+          if [ "$code" -ne 0 ]; then
+            echo "expected exit code 0, got $code"
+            cat /tmp/analyze.err
+            exit 1
+          fi
+          if ! grep -q "github.api_enabled is true but GITHUB_TOKEN is not set" /tmp/analyze.err; then
+            echo "expected missing-token warning on stderr"
+            cat /tmp/analyze.err
+            exit 1
+          fi
+
   lint:
     runs-on: ubuntu-latest
     steps:

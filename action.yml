@@ -51,6 +51,13 @@ inputs:
       checkout (used for dogfooding in the checkOwners repo itself).
     required: false
     default: ""
+  github_token:
+    description: >-
+      Token exported as GITHUB_TOKEN for CLI handle resolution and API
+      features. Override with a PAT or App token when the default job
+      token cannot list org teams.
+    required: false
+    default: ${{ github.token }}
 
 outputs:
   checkowners_drift:
@@ -104,6 +111,7 @@ runs:
         # action inputs win over whatever the repo's checkowners.yml declares.
         CHECKOWNERS_CONFIG: ${{ inputs.config }}
         CHECKOWNERS_DRIFT_MODE: ${{ inputs.mode }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
       run: |
         checkowners drift --json > drift.json
         {
@@ -121,6 +129,7 @@ runs:
       shell: bash
       env:
         CHECKOWNERS_CONFIG: ${{ inputs.config }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
       run: |
         checkowners bus-factor --all --json > bus_factor.json
         {
@@ -136,6 +145,7 @@ runs:
       shell: bash
       env:
         CHECKOWNERS_CONFIG: ${{ inputs.config }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
       run: |
         checkowners decay --json > decay.json
         {

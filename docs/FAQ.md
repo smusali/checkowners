@@ -52,15 +52,33 @@ export GITHUB_TOKEN=ghp_...
 checkowners generate
 ```
 
-In GitHub Actions, `${{ secrets.GITHUB_TOKEN }}` is automatically available; see the composite action documented in [docs/USAGE.md](USAGE.md#github-actions).
+In GitHub Actions the job token exists as `${{ secrets.GITHUB_TOKEN }}` / `${{ github.token }}`, but a `run:` step only sees `GITHUB_TOKEN` if the workflow exports it. The composite action does this for you: `github_token` defaults to `${{ github.token }}` and is exported on every CLI step. Pass a PAT or App token only when the default job token is not enough (org team listing). See [docs/USAGE.md](USAGE.md#github-actions).
+
+```yaml
+- uses: smusali/checkowners@v0.5.0
+  # github_token defaults to github.token; override only when you need a PAT.
+  with:
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+If you invoke the CLI yourself in a `run:` step, export the token:
+
+```yaml
+- run: checkowners drift --json
+  env:
+    GITHUB_TOKEN: ${{ github.token }}
+```
 
 ### What token scopes are needed?
 
-- Email to username: public `read:user` is sufficient.
-- Team resolution: `read:org` so org teams and their members are visible.
-- Review-load analysis: `repo` (or fine-grained PR `read` for the org).
+| Capability | Job token (`permissions`) | Classic PAT | Fine-grained PAT |
+|---|---|---|---|
+| Email to `@username` (user search) | Default job token is enough (`contents: read` is already required for checkout) | Authenticated token; `read:user` if you want the user-search scope stated explicitly | No extra repository permission |
+| Team / subteam resolution | Not available: the default `GITHUB_TOKEN` is repo-scoped and cannot list org teams. Pass a PAT or App token via `github_token` | `read:org` | Organization members: Read |
+| Review coverage and review-load balance (`github.api_enabled`) | `pull-requests: read` | `repo` (private) or `public_repo` | Pull requests: Read |
+| PR comment (Action `comment_on_pr`) | `pull-requests: write` | `repo` | Pull requests: Write |
 
-A fine-grained PAT scoped to the target org with the minimums above is the recommended setup.
+A fine-grained PAT scoped to the target org with the minimums above is the recommended setup when the job token cannot reach org teams.
 
 ## File locations
 

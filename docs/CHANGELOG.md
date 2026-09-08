@@ -14,6 +14,13 @@ Each dated heading is the UTC calendar day that version was published to PyPI (`
 ### Fixed
 - README documentation and license links are now absolute GitHub URLs so they
   resolve on the PyPI project page.
+- The composite Action exports `GITHUB_TOKEN` on every CLI step via a
+  `github_token` input (default `${{ github.token }}`). The 0.5.0 claim that
+  installing the `github` extra made handle resolution work in CI was
+  incomplete: the extra was installed, but the token was never passed, so
+  only local noreply parsing worked. When `github.api_enabled` is true and
+  no token is reachable, the CLI now prints a warning naming `GITHUB_TOKEN`
+  instead of degrading silently.
 
 ### Changed
 - Project URLs, documentation clone and issue links, the Actions example,
