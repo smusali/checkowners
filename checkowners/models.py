@@ -56,6 +56,7 @@ class PathsConfig:
         "*.min.js",
         "*.min.css",
         "*.map",
+        "*.whl",
         ".github/CODEOWNERS",
         "CODEOWNERS",
         "docs/CODEOWNERS",

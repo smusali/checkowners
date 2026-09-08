@@ -136,7 +136,7 @@ runs:
             exit 1
           fi
           install_lockfile "${INDEX_ARGS[@]}"
-          python -m pip install --no-deps --no-build-isolation "${CHECKOWNERS_INSTALL_SPEC}"
+          python -m pip install --no-deps "${CHECKOWNERS_INSTALL_SPEC}"
         elif [ "${CHECKOWNERS_OFFLINE}" = "true" ]; then
           if [ -n "${CHECKOWNERS_VERSION}" ] && [ "${CHECKOWNERS_VERSION}" != "${CHECKOWNERS_PINNED_VERSION}" ]; then
             echo "::error::offline install requires checkowners_version to match the Action pin (${CHECKOWNERS_PINNED_VERSION})"

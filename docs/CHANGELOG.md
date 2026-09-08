@@ -20,6 +20,9 @@ Each dated heading is the UTC calendar day that version was published to PyPI (`
 ### Fixed
 - The composite Action no longer installs an unpinned latest package from
   PyPI. `uses: smusali/checkowners@vX.Y.Z` now installs `checkowners==X.Y.Z`.
+- `install_spec` dogfood installs use pip's isolated build env so hatchling
+  is available. `git blame` no longer crashes on non-UTF-8 files, and `*.whl`
+  is excluded from inference.
 - README documentation and license links are now absolute GitHub URLs so they
   resolve on the PyPI project page.
 - The composite Action exports `GITHUB_TOKEN` on every CLI step via a

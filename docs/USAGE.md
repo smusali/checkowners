@@ -60,6 +60,7 @@ paths:
     - "*.min.js"
     - "*.min.css"
     - "*.map"
+    - "*.whl"
     - ".github/CODEOWNERS"   # the generated file itself is never inferred
     - "CODEOWNERS"
     - "docs/CODEOWNERS"
