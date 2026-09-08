@@ -101,12 +101,15 @@ Tagged releases trigger `.github/workflows/publish.yml` which builds and uploads
 
 Append user-visible notes under `[Unreleased]` in [docs/CHANGELOG.md](CHANGELOG.md) as they merge. Each dated heading is the UTC calendar day the GitHub Release will be published (that event uploads to PyPI), formatted `YYYY-MM-DD`. `Unreleased` has no date. If publish slips to another UTC day, update the heading before creating the Release.
 
-`python tools/check_changelog.py vX.Y.Z` must succeed before tagging. The publish job runs the same check and fails the upload if the heading is missing or has no date.
+`python tools/check_changelog.py vX.Y.Z` must succeed before tagging. The publish job runs the same check and fails the upload if the heading is missing, has no date, or the Action pin / wheel / lockfile disagree with the tag.
 
 Steps:
 
 1. Bump `version` in `pyproject.toml` and `__version__` in `checkowners/__init__.py`.
-2. Promote `[Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`, leave a fresh `[Unreleased]`, and refresh the compare links at the bottom of the changelog.
-3. Confirm `python tools/check_changelog.py vX.Y.Z` succeeds.
-4. Tag the commit: `git tag -a v0.X.Y -m "v0.X.Y"` and push the tag.
-5. Create a GitHub Release pointing at the tag; the publish workflow takes it from there.
+2. Set the Action pin to the same version: `checkowners_version` default and `CHECKOWNERS_PINNED_VERSION` in `action.yml`.
+3. Rebuild the Action wheel (`hatch build`) and replace `checkowners-X.Y.Z-py3-none-any.whl` at the repository root. Remove the previous version's wheel.
+4. Regenerate the hashed lockfile: `pip-compile --generate-hashes --extra graph --extra github -o requirements.lock pyproject.toml`.
+5. Promote `[Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`, leave a fresh `[Unreleased]`, and refresh the compare links at the bottom of the changelog.
+6. Confirm `python tools/check_changelog.py vX.Y.Z` succeeds.
+7. Tag the commit: `git tag -a v0.X.Y -m "v0.X.Y"` and push the tag.
+8. Create a GitHub Release pointing at the tag; the publish workflow takes it from there.

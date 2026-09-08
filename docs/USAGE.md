@@ -60,6 +60,7 @@ paths:
     - "*.min.js"
     - "*.min.css"
     - "*.map"
+    - "*.whl"
     - ".github/CODEOWNERS"   # the generated file itself is never inferred
     - "CODEOWNERS"
     - "docs/CODEOWNERS"
@@ -184,6 +185,17 @@ The composite action exports `GITHUB_TOKEN` on every CLI step from the `github_t
 The composite action also accepts `fail_on_drift: "false"` if you want to comment without blocking, `include_bus_factor` / `include_decay` toggles for the secondary outputs, and `comment_on_pr` (default `"true"`) which maintains a single drift + bus-factor summary comment on the pull request, updated in place on every push and marked resolved when drift clears (the job must grant `pull-requests: write`).
 
 The action fails fast with a clear error when it detects a shallow clone: `git log` and `git blame` need history, so the `actions/checkout` step must set `fetch-depth: 0`.
+
+With no extra inputs, Action `vX.Y.Z` installs `checkowners==X.Y.Z` from the wheel committed next to `action.yml`, and installs third-party dependencies from `requirements.lock` with `pip install --require-hashes --only-binary :all:`. An empty `checkowners_version` uses that pin; it never installs "whatever PyPI serves today." After install, the action asserts `checkowners --version` matches the pin.
+
+Advanced install inputs:
+
+| Input | Default | Purpose |
+|-------|---------|---------|
+| `checkowners_version` | this Action's tag version | Override to install a different published version from the index. That path still uses the hashed lockfile for third-party deps, but skips hash verification for the `checkowners` package itself. |
+| `index_url` | (PyPI) | pip `--index-url` for an internal mirror. |
+| `offline` | `"false"` | Install the committed wheel with `--no-index --find-links`. The override must match the pin. A fully air-gapped runner also needs the lockfile wheels on disk (`pip download --require-hashes -r requirements.lock -d <dir>`) or a reachable `index_url`. |
+| `install_spec` | `""` | **Security-sensitive.** Allowed only as a local extras spec for dogfooding this repository: `.`, `.[graph]`, `.[github]`, `.[graph,github]`, `.[github,graph]`, or `.[all]`. Interpolating untrusted workflow data into this input is remote code execution. Downstream callers must omit it. |
 
 ## How checkowners compares
 

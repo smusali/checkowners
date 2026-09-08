@@ -10,8 +10,19 @@ Each dated heading is the UTC calendar day that version was published to PyPI (`
 
 ### Added
 - The publish workflow rejects a GitHub Release whose tag has no dated changelog heading.
+- The composite Action installs the `checkowners` version that matches its
+  own tag from a committed wheel and a hashed `requirements.lock`. New
+  `index_url` and `offline` inputs support internal mirrors and air-gapped
+  runners. `install_spec` is limited to a local extras allowlist.
+- CI and the publish job fail when the Action pin, package version, wheel,
+  or lockfile disagree with each other (or with the release tag).
 
 ### Fixed
+- The composite Action no longer installs an unpinned latest package from
+  PyPI. `uses: smusali/checkowners@vX.Y.Z` now installs `checkowners==X.Y.Z`.
+- `install_spec` dogfood installs use pip's isolated build env so hatchling
+  is available. `git blame` no longer crashes on non-UTF-8 files, and `*.whl`
+  is excluded from inference.
 - README documentation and license links are now absolute GitHub URLs so they
   resolve on the PyPI project page.
 - The composite Action exports `GITHUB_TOKEN` on every CLI step via a

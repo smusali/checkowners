@@ -40,17 +40,30 @@ inputs:
     default: "3.13"
   checkowners_version:
     description: >-
-      Version of the checkowners PyPI package to install. Use "" to install
-      the latest published release.
+      Advanced override for the checkowners package version. Omit or leave
+      at the default to install the version that matches this Action tag.
+      An empty value uses the pin, never the latest PyPI release.
     required: false
-    default: ""
+    default: "0.5.0"
   install_spec:
     description: >-
-      Full pip install spec overriding the PyPI package, e.g.
-      ".[graph,github]" to run the action against the repository's own
-      checkout (used for dogfooding in the checkOwners repo itself).
+      SECURITY-SENSITIVE. Interpolating untrusted workflow data into this
+      input is remote code execution. Allowed only as a local extras spec
+      for dogfooding this repository: ".", ".[graph]", ".[github]",
+      ".[graph,github]", ".[github,graph]", or ".[all]". Downstream
+      callers must omit this input.
     required: false
     default: ""
+  index_url:
+    description: Optional pip --index-url for an internal package mirror.
+    required: false
+    default: ""
+  offline:
+    description: >-
+      Install the committed wheel with --no-index --find-links. A fully
+      air-gapped runner also needs the lockfile wheels on disk or a mirror.
+    required: false
+    default: "false"
   github_token:
     description: >-
       Token exported as GITHUB_TOKEN for CLI handle resolution and API
@@ -94,13 +107,73 @@ runs:
       env:
         CHECKOWNERS_VERSION: ${{ inputs.checkowners_version }}
         CHECKOWNERS_INSTALL_SPEC: ${{ inputs.install_spec }}
+        CHECKOWNERS_INDEX_URL: ${{ inputs.index_url }}
+        CHECKOWNERS_OFFLINE: ${{ inputs.offline }}
+        CHECKOWNERS_PINNED_VERSION: "0.5.0"
       run: |
-        if [ -n "$CHECKOWNERS_INSTALL_SPEC" ]; then
-          pip install --upgrade "$CHECKOWNERS_INSTALL_SPEC"
-        elif [ -n "$CHECKOWNERS_VERSION" ]; then
-          pip install --upgrade "checkowners[graph,github]==$CHECKOWNERS_VERSION"
+        set -euo pipefail
+        ACTION_ROOT="${GITHUB_ACTION_PATH}"
+        LOCK="${ACTION_ROOT}/requirements.lock"
+        VERSION="${CHECKOWNERS_VERSION:-$CHECKOWNERS_PINNED_VERSION}"
+        INDEX_ARGS=()
+        if [ -n "${CHECKOWNERS_INDEX_URL}" ]; then
+          INDEX_ARGS+=(--index-url "${CHECKOWNERS_INDEX_URL}")
+        fi
+
+        install_lockfile() {
+          python -m pip install --no-deps --require-hashes --only-binary=:all: \
+            "$@" -r "${LOCK}"
+        }
+
+        if [ -n "${CHECKOWNERS_INSTALL_SPEC}" ]; then
+          if [ "${CHECKOWNERS_INSTALL_SPEC}" != "." ] \
+            && [ "${CHECKOWNERS_INSTALL_SPEC}" != ".[graph]" ] \
+            && [ "${CHECKOWNERS_INSTALL_SPEC}" != ".[github]" ] \
+            && [ "${CHECKOWNERS_INSTALL_SPEC}" != ".[graph,github]" ] \
+            && [ "${CHECKOWNERS_INSTALL_SPEC}" != ".[github,graph]" ] \
+            && [ "${CHECKOWNERS_INSTALL_SPEC}" != ".[all]" ]; then
+            echo "::error::install_spec must be a local extras spec: . .[graph] .[github] .[graph,github] .[github,graph] .[all]"
+            exit 1
+          fi
+          install_lockfile "${INDEX_ARGS[@]}"
+          python -m pip install --no-deps "${CHECKOWNERS_INSTALL_SPEC}"
+        elif [ "${CHECKOWNERS_OFFLINE}" = "true" ]; then
+          if [ -n "${CHECKOWNERS_VERSION}" ] && [ "${CHECKOWNERS_VERSION}" != "${CHECKOWNERS_PINNED_VERSION}" ]; then
+            echo "::error::offline install requires checkowners_version to match the Action pin (${CHECKOWNERS_PINNED_VERSION})"
+            exit 1
+          fi
+          WHEEL="${ACTION_ROOT}/checkowners-${CHECKOWNERS_PINNED_VERSION}-py3-none-any.whl"
+          if [ ! -f "${WHEEL}" ]; then
+            echo "::error::offline install requires ${WHEEL}"
+            exit 1
+          fi
+          install_lockfile --no-index --find-links "${ACTION_ROOT}"
+          python -m pip install --no-deps --no-index --find-links "${ACTION_ROOT}" \
+            "checkowners==${CHECKOWNERS_PINNED_VERSION}"
+        elif [ -n "${CHECKOWNERS_VERSION}" ] && [ "${CHECKOWNERS_VERSION}" != "${CHECKOWNERS_PINNED_VERSION}" ]; then
+          install_lockfile "${INDEX_ARGS[@]}"
+          python -m pip install --no-deps --only-binary=:all: \
+            "${INDEX_ARGS[@]}" "checkowners==${VERSION}"
         else
-          pip install --upgrade "checkowners[graph,github]"
+          WHEEL="${ACTION_ROOT}/checkowners-${CHECKOWNERS_PINNED_VERSION}-py3-none-any.whl"
+          if [ ! -f "${WHEEL}" ]; then
+            echo "::error::missing pinned wheel ${WHEEL}"
+            exit 1
+          fi
+          install_lockfile "${INDEX_ARGS[@]}"
+          python -m pip install --no-deps --no-index --find-links "${ACTION_ROOT}" \
+            "checkowners==${CHECKOWNERS_PINNED_VERSION}"
+        fi
+
+        got="$(checkowners --version)"
+        if [ -n "${CHECKOWNERS_INSTALL_SPEC}" ]; then
+          if [[ ! "${got}" =~ ^checkowners\ [0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::expected 'checkowners <semver>', got: ${got}"
+            exit 1
+          fi
+        elif [ "${got}" != "checkowners ${VERSION}" ]; then
+          echo "::error::installed '${got}', expected 'checkowners ${VERSION}'"
+          exit 1
         fi
 
     - name: Run checkowners drift

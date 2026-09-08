@@ -76,6 +76,7 @@ exclude = [
     ".instructions",
     ".pre-commit-config.yaml",
     "tools",
+    "*.whl",
 ]
 
 [tool.hatch.envs.default]

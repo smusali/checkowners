@@ -36,6 +36,7 @@ def test_load_config_defaults(tmp_path: Path) -> None:
         "*.min.js",
         "*.min.css",
         "*.map",
+        "*.whl",
         ".github/CODEOWNERS",
         "CODEOWNERS",
         "docs/CODEOWNERS",

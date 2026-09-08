@@ -375,6 +375,8 @@ def _blame_for_path(repo_root: Path, path: str) -> dict[str, float]:
             ["git", "blame", "--line-porcelain", "--", path],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=str(repo_root),
             check=True,
         )
