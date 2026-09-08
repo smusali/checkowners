@@ -9,6 +9,9 @@ Each dated heading is the UTC calendar day that version was published to PyPI (`
 ## [Unreleased]
 
 ### Added
+- Third-party GitHub Actions are pinned to full commit SHAs. Dependabot
+  watches the `github-actions` ecosystem, and CI fails on any unpinned
+  `uses:` reference.
 - The publish workflow rejects a GitHub Release whose tag has no dated changelog heading.
 - The composite Action installs the `checkowners` version that matches its
   own tag from a committed wheel and a hashed `requirements.lock`. New
