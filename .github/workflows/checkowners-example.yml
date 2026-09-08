@@ -11,7 +11,7 @@ jobs:
       pull-requests: write
       issues: write           # required to label PRs as ownership-critical
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0       # git log + git blame need the full history
 
@@ -45,7 +45,7 @@ jobs:
       # Example of consuming the action's outputs for custom logic.
       - name: Add ownership-critical label
         if: fromJson(steps.checkowners.outputs.bus_factor_summary).critical_paths[0]
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.0.1
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v7.0.1
         with:
           script: |
             await github.rest.issues.addLabels({
